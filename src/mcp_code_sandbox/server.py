@@ -1,12 +1,13 @@
 """FastMCP server with tool definitions."""
 
-import uuid
-from datetime import UTC, datetime
+import asyncio
 
+import docker
+import structlog
 from fastmcp import FastMCP
 
 from mcp_code_sandbox.config import SandboxConfig
-from mcp_code_sandbox.logging import configure_logging
+from mcp_code_sandbox.logging import configure_logging, session_id_var
 from mcp_code_sandbox.models import (
     CloseSessionResult,
     ErrorResponse,
@@ -15,21 +16,17 @@ from mcp_code_sandbox.models import (
     RunResult,
     UploadResult,
 )
+from mcp_code_sandbox.session import SessionManager
 
 config = SandboxConfig()
 configure_logging(config)
 
+log = structlog.get_logger("mcp_code_sandbox.server")
+
+docker_client = docker.from_env()
+session_manager = SessionManager(config, docker_client)
+
 mcp = FastMCP("mcp-code-sandbox")
-
-
-def _generate_session_id() -> str:
-    return f"sess_{uuid.uuid4().hex[:12]}"
-
-
-def _generate_run_id() -> str:
-    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    short = uuid.uuid4().hex[:4]
-    return f"run_{ts}_{short}"
 
 
 @mcp.tool
@@ -52,10 +49,10 @@ async def upload_file(
         overwrite: Set to true to replace an existing file with the same name.
 
     Returns:
-        session_id and the path where the file was stored, or an error if the file already exists.
+        session_id and the path where the file was stored, or an error if the file exists.
     """
-    sid = session_id or _generate_session_id()
-    _ = content_base64, overwrite  # stub: unused
+    sid = session_id or SessionManager.generate_session_id()
+    _ = content_base64, overwrite  # stub: unused until Stage 2
     return UploadResult(session_id=sid, path=f"/mnt/data/{filename}")
 
 
@@ -78,17 +75,9 @@ async def run_python(
         stdout, stderr, exit_code, list of new/changed artifacts, and execution duration.
         On timeout, exit_code is -1 with a timeout message in stderr.
     """
-    sid = session_id or _generate_session_id()
-    rid = _generate_run_id()
-    return RunResult(
-        session_id=sid,
-        run_id=rid,
-        exit_code=0,
-        stdout="Hello from stub\n",
-        stderr="",
-        artifacts=[],
-        duration_ms=0,
-    )
+    session_id_var.set(session_id)
+    result = await asyncio.to_thread(session_manager.execute, session_id, code)
+    return result
 
 
 @mcp.tool
@@ -108,6 +97,7 @@ async def read_artifact(
     Returns:
         File content as base64 with metadata, or an error if not found or too large (>10MB).
     """
+    _ = session_id  # stub: unused until Stage 2
     filename = path.rsplit("/", 1)[-1]
     return ReadArtifactResult(
         path=path,
@@ -133,7 +123,7 @@ async def list_artifacts(
     Returns:
         List of artifacts with filename, size, MIME type, and optional download URL.
     """
-    _ = session_id  # stub: unused
+    _ = session_id  # stub: unused until Stage 2
     return ListArtifactsResult(artifacts=[])
 
 
@@ -152,8 +142,9 @@ async def close_session(
     Returns:
         Confirmation that the session was closed, or an error if not found.
     """
-    _ = session_id  # stub: unused
-    return CloseSessionResult(status="closed")
+    session_id_var.set(session_id)
+    result = await asyncio.to_thread(session_manager.close, session_id)
+    return result
 
 
 def main() -> None:

@@ -1,0 +1,6 @@
+name: mcp-code-sandbox
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+prefix: /home/gaiar/miniforge3/envs/mcp-code-sandbox

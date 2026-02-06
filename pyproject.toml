@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-code-sandbox"
+version = "0.1.0"
+description = "Self-hosted MCP server for executing Python in isolated Docker containers"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.0",
+    "docker>=7.0",
+    "structlog>=24.0",
+    "pydantic-settings>=2.0",
+]
+
+[project.scripts]
+mcp-code-sandbox = "mcp_code_sandbox.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_code_sandbox"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+mypy_path = "src"
+packages = ["mcp_code_sandbox"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests requiring Docker daemon",
+]
+asyncio_mode = "auto"

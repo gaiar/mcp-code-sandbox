@@ -55,13 +55,11 @@ def http_session_manager(
     # Cleanup
     for _sid, container in list(mgr.sessions.items()):
         with contextlib.suppress(Exception):
-            container.remove(force=True)
+            container.remove(force=True, v=True)
     mgr.sessions.clear()
 
 
-def test_download_url_in_artifacts(
-    http_session_manager: SessionManager, http_port: int
-) -> None:
+def test_download_url_in_artifacts(http_session_manager: SessionManager, http_port: int) -> None:
     """Verify run_python includes download_url when HTTP server is running."""
     csv_data = b"x,y\n1,2\n"
     b64 = base64.b64encode(csv_data).decode()
@@ -96,9 +94,7 @@ def test_http_download(http_session_manager: SessionManager, http_port: int) -> 
     assert "text/plain" in resp.headers["content-type"]
 
 
-def test_http_download_png(
-    http_session_manager: SessionManager, http_port: int
-) -> None:
+def test_http_download_png(http_session_manager: SessionManager, http_port: int) -> None:
     """Download a generated PNG via HTTP."""
     run = http_session_manager.execute(
         None,
@@ -120,18 +116,14 @@ plt.savefig('/mnt/data/test.png')
     assert "image/png" in resp.headers["content-type"]
 
 
-def test_http_404_missing_session(
-    http_session_manager: SessionManager, http_port: int
-) -> None:
+def test_http_404_missing_session(http_session_manager: SessionManager, http_port: int) -> None:
     """HTTP returns 404 for nonexistent session."""
     _ = http_session_manager  # ensure fixture runs
     resp = httpx.get(f"http://127.0.0.1:{http_port}/files/sess_nope/file.txt")
     assert resp.status_code == 404
 
 
-def test_http_404_missing_file(
-    http_session_manager: SessionManager, http_port: int
-) -> None:
+def test_http_404_missing_file(http_session_manager: SessionManager, http_port: int) -> None:
     """HTTP returns 404 for nonexistent file in valid session."""
     run = http_session_manager.execute(None, "print('hi')")
     assert isinstance(run, RunResult)

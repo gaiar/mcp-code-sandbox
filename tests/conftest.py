@@ -33,5 +33,5 @@ def session_manager(
     # Cleanup: force-remove all containers created during the test
     for _sid, container in list(mgr.sessions.items()):
         with contextlib.suppress(Exception):
-            container.remove(force=True)
+            container.remove(force=True, v=True)
     mgr.sessions.clear()

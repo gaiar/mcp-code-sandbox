@@ -7,6 +7,7 @@ import io
 import mimetypes
 import re
 import tarfile
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -110,6 +111,7 @@ class SessionManager:
         self._client = docker_client
         self._sessions: dict[str, Container] = {}
         self._last_accessed: dict[str, float] = {}
+        self._locks: dict[str, threading.Lock] = {}
         self._http_enabled = False
 
     def enable_http(self) -> None:
@@ -137,10 +139,12 @@ class SessionManager:
         short = uuid.uuid4().hex[:4]
         return f"run_{ts}_{short}"
 
-    def get_or_create(self, session_id: str | None = None) -> tuple[str, Container]:
+    def get_or_create(
+        self, session_id: str | None = None
+    ) -> tuple[str, Container] | ErrorResponse:
         """Get existing container or create a new one.
 
-        Returns (session_id, container).
+        Returns (session_id, container) or ErrorResponse if max_sessions reached.
         """
         sid = session_id or self.generate_session_id()
 
@@ -148,6 +152,21 @@ class SessionManager:
             self._last_accessed[sid] = time.monotonic()
             log.debug("session_reused", session_id=sid)
             return sid, self._sessions[sid]
+
+        # Enforce max sessions limit
+        if len(self._sessions) >= self._config.max_sessions:
+            log.warning(
+                "max_sessions_reached",
+                current=len(self._sessions),
+                limit=self._config.max_sessions,
+            )
+            return ErrorResponse(
+                error="max_sessions",
+                message=(
+                    f"Maximum {self._config.max_sessions} concurrent sessions reached. "
+                    "Close an existing session first."
+                ),
+            )
 
         log.info("session_creating", session_id=sid, image=self._config.image)
         start = time.monotonic()
@@ -160,6 +179,9 @@ class SessionManager:
             network_disabled=True,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
+            read_only=True,
+            tmpfs={"/tmp": "size=64m,uid=1000,gid=1000"},
+            volumes=["/mnt/data"],
             mem_limit=self._config.memory_limit,
             nano_cpus=int(self._config.cpu_limit * 1e9),
             detach=True,
@@ -171,6 +193,7 @@ class SessionManager:
 
         self._sessions[sid] = container
         self._last_accessed[sid] = time.monotonic()
+        self._locks[sid] = threading.Lock()
         return sid, container
 
     # --- Upload ---
@@ -188,9 +211,12 @@ class SessionManager:
             return err
 
         try:
-            sid, container = self.get_or_create(session_id)
+            result = self.get_or_create(session_id)
         except Exception as exc:
             return self._map_docker_error(exc, session_id or "unknown")
+        if isinstance(result, ErrorResponse):
+            return result
+        sid, container = result
 
         # Check if file exists (unless overwrite)
         if not overwrite:
@@ -230,8 +256,14 @@ class SessionManager:
         """Snapshot current files in /mnt/data (name, size, mtime)."""
         exit_code, output = container.exec_run(
             [
-                "find", "/mnt/data", "-maxdepth", "1", "-type", "f",
-                "-printf", "%f\\t%s\\t%T@\\n",
+                "find",
+                "/mnt/data",
+                "-maxdepth",
+                "1",
+                "-type",
+                "f",
+                "-printf",
+                "%f\\t%s\\t%T@\\n",
             ],
             demux=True,
         )
@@ -273,10 +305,34 @@ class SessionManager:
     def execute(self, session_id: str | None, code: str) -> RunResult | ErrorResponse:
         """Execute Python code in the session container."""
         try:
-            sid, container = self.get_or_create(session_id)
+            result = self.get_or_create(session_id)
         except Exception as exc:
             return self._map_docker_error(exc, session_id or "unknown")
+        if isinstance(result, ErrorResponse):
+            return result
+        sid, container = result
 
+        # Per-session lock — reject if already busy
+        lock = self._locks.get(sid)
+        if lock is None:
+            lock = threading.Lock()
+            self._locks[sid] = lock
+        if not lock.acquire(blocking=False):
+            return ErrorResponse(
+                error="session_busy",
+                message=(
+                    f"Session {sid} is already executing code. Wait or use a different session."
+                ),
+            )
+        try:
+            return self._execute_locked(sid, container, code)
+        finally:
+            lock.release()
+
+    def _execute_locked(
+        self, sid: str, container: Container, code: str
+    ) -> RunResult | ErrorResponse:
+        """Execute code while holding the session lock."""
         run_id = self.generate_run_id()
         log.info("container_exec_start", session_id=sid, run_id=run_id, code_bytes=len(code))
 
@@ -286,7 +342,7 @@ class SessionManager:
         start = time.monotonic()
         try:
             exit_code, output = container.exec_run(
-                ["python", "-c", code],
+                ["timeout", str(self._config.exec_timeout_s), "python", "-c", code],
                 workdir="/mnt/data",
                 demux=True,
             )
@@ -295,11 +351,39 @@ class SessionManager:
 
         duration_ms = int((time.monotonic() - start) * 1000)
 
+        # timeout(1) returns 124 when it kills the child process
+        timed_out = exit_code == 124
+        if timed_out:
+            exit_code = -1
+
         stdout_bytes = output[0] if output[0] else b""
         stderr_bytes = output[1] if output[1] else b""
 
+        # Truncate output if exceeding limit
+        max_out = self._config.max_output_bytes
+        stdout_truncated = len(stdout_bytes) > max_out
+        stderr_truncated = len(stderr_bytes) > max_out
+        if stdout_truncated:
+            stdout_bytes = stdout_bytes[:max_out]
+            log.warning(
+                "stdout_truncated",
+                session_id=sid,
+                original_bytes=len(output[0] or b""),
+                limit_bytes=max_out,
+            )
+        if stderr_truncated:
+            stderr_bytes = stderr_bytes[:max_out]
+            log.warning(
+                "stderr_truncated",
+                session_id=sid,
+                original_bytes=len(output[1] or b""),
+                limit_bytes=max_out,
+            )
+
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
+        if timed_out:
+            stderr += f"\nExecution timed out after {self._config.exec_timeout_s}s"
 
         # Artifact scan only on success
         artifacts: list[ArtifactInfo] = []
@@ -330,6 +414,8 @@ class SessionManager:
             exit_code=exit_code,
             stdout=stdout,
             stderr=stderr,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
             artifacts=artifacts,
             duration_ms=duration_ms,
         )
@@ -424,10 +510,11 @@ class SessionManager:
 
         container = self._sessions.pop(session_id)
         self._last_accessed.pop(session_id, None)
+        self._locks.pop(session_id, None)
 
         log.info("session_destroying", session_id=session_id)
         try:
-            container.remove(force=True)
+            container.remove(force=True, v=True)
         except Exception as exc:
             log.error("session_destroy_failed", session_id=session_id, error=str(exc))
             return self._map_docker_error(exc, session_id)

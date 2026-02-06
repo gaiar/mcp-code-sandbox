@@ -17,6 +17,11 @@ from mcp_code_sandbox.models import (
     UploadResult,
 )
 from mcp_code_sandbox.session import SessionManager
+from mcp_code_sandbox.validation import (
+    validate_code_size,
+    validate_session_id,
+    validate_upload_size,
+)
 
 config = SandboxConfig()
 configure_logging(config)
@@ -51,6 +56,10 @@ async def upload_file(
     Returns:
         session_id and the path where the file was stored, or an error if the file exists.
     """
+    if err := validate_session_id(session_id):
+        return err
+    if err := validate_upload_size(content_base64, config):
+        return err
     session_id_var.set(session_id)
     return await asyncio.to_thread(
         session_manager.upload, session_id, filename, content_base64, overwrite
@@ -76,6 +85,10 @@ async def run_python(
         stdout, stderr, exit_code, list of new/changed artifacts, and execution duration.
         On timeout, exit_code is -1 with a timeout message in stderr.
     """
+    if err := validate_session_id(session_id):
+        return err
+    if err := validate_code_size(code, config):
+        return err
     session_id_var.set(session_id)
     return await asyncio.to_thread(session_manager.execute, session_id, code)
 
@@ -97,6 +110,8 @@ async def read_artifact(
     Returns:
         File content as base64 with metadata, or an error if not found or too large (>10MB).
     """
+    if err := validate_session_id(session_id):
+        return err
     session_id_var.set(session_id)
     return await asyncio.to_thread(session_manager.read_file, session_id, path)
 
@@ -116,6 +131,8 @@ async def list_artifacts(
     Returns:
         List of artifacts with filename, size, MIME type, and optional download URL.
     """
+    if err := validate_session_id(session_id):
+        return err
     session_id_var.set(session_id)
     return await asyncio.to_thread(session_manager.list_files, session_id)
 
@@ -135,6 +152,8 @@ async def close_session(
     Returns:
         Confirmation that the session was closed, or an error if not found.
     """
+    if err := validate_session_id(session_id):
+        return err
     session_id_var.set(session_id)
     return await asyncio.to_thread(session_manager.close, session_id)
 
@@ -143,7 +162,11 @@ def main() -> None:
     """Entry point for the MCP server (stdio transport)."""
     import threading
 
+    from mcp_code_sandbox.cleanup import remove_orphan_containers, start_ttl_cleanup
     from mcp_code_sandbox.http_server import run_http_server
+
+    # Remove orphan containers from previous runs
+    remove_orphan_containers(docker_client)
 
     # Start HTTP artifact server in background thread
     session_manager.enable_http()
@@ -153,6 +176,9 @@ def main() -> None:
         daemon=True,
     )
     http_thread.start()
+
+    # Start TTL cleanup background thread
+    start_ttl_cleanup(config, session_manager)
 
     mcp.run()
 

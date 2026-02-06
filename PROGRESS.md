@@ -33,37 +33,42 @@ Tracks completion of the implementation plan (PRD v2, Stages 0-5).
 - [x] 2.2 — Implement artifact scanning (before/after snapshot diff)
 - [x] 2.3 — Implement `list_artifacts` in SessionManager
 - [x] 2.4 — Implement `read_artifact` in SessionManager (get_archive, extract tar, base64)
-- [ ] 2.5 — Stage 2 integration tests **<-- CURRENT**
-- [ ] 2.6 — Commit Stage 2
+- [x] 2.5 — Stage 2 integration tests — 10 artifact tests pass
+- [x] 2.6 — Commit Stage 2
 
 ## Stage 3: End-to-End Demo
 
-- [ ] 3.1 — Create demo script (`examples/marketing_demo.py`)
-- [ ] 3.2 — Error iteration in demo
-- [ ] 3.3 — Commit Stage 3
+- [x] 3.1 — Create demo script (`examples/marketing_demo.py`)
+- [x] 3.2 — Error iteration in demo
+- [x] 3.3 — Commit Stage 3
 
 ## Stage 4: HTTP Artifact Server
 
-- [ ] 4.1 — HTTP artifact download endpoint
-- [ ] 4.2 — Wire `download_url` into artifact responses
-- [ ] 4.3 — Stage 4 integration tests
-- [ ] 4.4 — Commit Stage 4
+- [x] 4.1 — HTTP artifact download endpoint (Starlette/uvicorn)
+- [x] 4.2 — Wire `download_url` into artifact responses
+- [x] 4.3 — Stage 4 integration tests — 5 HTTP tests pass
+- [x] 4.4 — Commit Stage 4
 
 ## Stage 5: Hardening
 
-- [ ] 5.1 — Input validation (session_id format, filename, path, code/upload size)
-- [ ] 5.2 — Execution limits (timeout, output truncation)
-- [ ] 5.3 — Concurrency guards (max sessions, per-session lock)
-- [ ] 5.4 — Session TTL and orphan cleanup
-- [ ] 5.5 — Structured logging integration
-- [ ] 5.6 — Read-only root filesystem
-- [ ] 5.7 — Full hardening test suite
-- [ ] 5.8 — Commit Stage 5
+- [x] 5.1 — Input validation (`validation.py`: session_id, filename, code/upload size)
+- [x] 5.2 — Execution limits (timeout via `timeout(1)`, output truncation)
+- [x] 5.3 — Concurrency guards (max_sessions rejection, per-session Lock for session_busy)
+- [x] 5.4 — Session TTL and orphan cleanup (`cleanup.py`: background thread + startup orphan removal)
+- [x] 5.5 — Structured logging integration (log event verification, no stdout leaks)
+- [x] 5.6 — Read-only root filesystem (`--read-only`, tmpfs /tmp, Docker volume /mnt/data)
+- [x] 5.7 — Full hardening test suite — 88 tests pass, ruff/mypy clean
+- [x] 5.8 — Commit Stage 5
+
+## Summary
+
+**All stages complete.** 88 tests (55 unit + 33 integration), ruff/mypy/format all clean.
 
 ## Notes
 
 - Conda env: `mcp-code-sandbox` (activate with `source ~/miniforge3/etc/profile.d/conda.sh && conda activate mcp-code-sandbox`)
 - Run unit tests: `pytest tests/unit/ -v`
 - Run integration tests: `pytest tests/integration/ -m integration -v`
+- Run all tests: `pytest tests/ -v`
 - Quality checks: `ruff check src/ tests/ && ruff format --check src/ tests/ && mypy src/`
 - Docker image: `llm-sandbox:latest` (build from `docker/Dockerfile`)

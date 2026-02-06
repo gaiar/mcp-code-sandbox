@@ -1,0 +1,13 @@
+campaign,channel,spend,impressions,clicks,conversions,revenue
+Spring Sale,Email,5000,120000,4800,240,48000
+Spring Sale,Social,8000,250000,7500,150,30000
+Spring Sale,Search,12000,80000,6400,320,64000
+Summer Blast,Email,6000,150000,6000,300,60000
+Summer Blast,Social,10000,300000,9000,180,36000
+Summer Blast,Search,15000,100000,8000,400,80000
+Fall Promo,Email,4500,100000,4000,200,40000
+Fall Promo,Social,7000,200000,6000,120,24000
+Fall Promo,Search,11000,70000,5600,280,56000
+Holiday Push,Email,8000,180000,7200,360,72000
+Holiday Push,Social,12000,350000,10500,210,42000
+Holiday Push,Search,18000,120000,9600,480,96000

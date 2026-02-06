@@ -52,6 +52,10 @@ Follow `prd-v2.md` Section 6 strictly. Each stage must be testable before moving
 
 All sandbox containers run with: `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only` (with tmpfs `/tmp`, writable `/mnt/data/`), 512MB memory, 1.0 CPU, 60s timeout.
 
+## Code Intelligence
+
+When making code changes or searching the codebase, use Pyright diagnostics (if available in the environment) for type checking, import resolution, and catching errors early. Pay attention to Pyright diagnostic messages in tool results and fix reported issues promptly.
+
 ## Development Guidelines
 
 ### Tool Error Convention

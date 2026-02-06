@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import base64
+import io
+import mimetypes
+import re
+import tarfile
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from mcp_code_sandbox.config import SandboxConfig
 from mcp_code_sandbox.models import (
+    ArtifactInfo,
     CloseSessionResult,
     ErrorResponse,
+    ListArtifactsResult,
+    ReadArtifactResult,
     RunResult,
+    UploadResult,
 )
 
 if TYPE_CHECKING:
@@ -21,6 +31,75 @@ if TYPE_CHECKING:
     from docker.models.containers import Container
 
 log = structlog.get_logger("mcp_code_sandbox.session")
+
+_FILENAME_RE = re.compile(r"^[a-zA-Z0-9._-]{1,255}$")
+
+
+def _validate_filename(filename: str) -> ErrorResponse | None:
+    """Validate filename against allowlist. Return ErrorResponse if invalid."""
+    if not _FILENAME_RE.match(filename):
+        return ErrorResponse(
+            error="invalid_filename",
+            message=(
+                f"Invalid filename '{filename}'. "
+                "Only letters, numbers, dots, hyphens, and underscores allowed."
+            ),
+        )
+    if ".." in filename:
+        return ErrorResponse(
+            error="invalid_path",
+            message="Path traversal not allowed",
+        )
+    return None
+
+
+def _validate_path(path: str) -> ErrorResponse | None:
+    """Validate that path resolves within /mnt/data/."""
+    resolved = str(PurePosixPath("/mnt/data").joinpath(PurePosixPath(path).name))
+    if not resolved.startswith("/mnt/data/"):
+        return ErrorResponse(
+            error="invalid_path",
+            message="Path outside /mnt/data/",
+        )
+    return None
+
+
+def _build_tar(filename: str, data: bytes) -> bytes:
+    """Build an in-memory tar archive containing a single file."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(name=filename)
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    buf.seek(0)
+    return buf.read()
+
+
+def _extract_from_tar(tar_stream: Any) -> bytes:
+    """Extract a single file's bytes from a docker get_archive tar stream."""
+    buf = io.BytesIO()
+    for chunk in tar_stream:
+        buf.write(chunk)
+    buf.seek(0)
+    with tarfile.open(fileobj=buf, mode="r") as tar:
+        members = tar.getmembers()
+        if not members:
+            return b""
+        f = tar.extractfile(members[0])
+        if f is None:
+            return b""
+        return f.read()
+
+
+class _FileInfo:
+    """Snapshot of a file in /mnt/data."""
+
+    __slots__ = ("mtime", "name", "size")
+
+    def __init__(self, name: str, size: int, mtime: str) -> None:
+        self.name = name
+        self.size = size
+        self.mtime = mtime
 
 
 class SessionManager:
@@ -80,6 +159,101 @@ class SessionManager:
         self._last_accessed[sid] = time.monotonic()
         return sid, container
 
+    # --- Upload ---
+
+    def upload(
+        self,
+        session_id: str | None,
+        filename: str,
+        content_base64: str,
+        overwrite: bool = False,
+    ) -> UploadResult | ErrorResponse:
+        """Upload a file into the session container at /mnt/data/<filename>."""
+        err = _validate_filename(filename)
+        if err:
+            return err
+
+        try:
+            sid, container = self.get_or_create(session_id)
+        except Exception as exc:
+            return self._map_docker_error(exc, session_id or "unknown")
+
+        # Check if file exists (unless overwrite)
+        if not overwrite:
+            exit_code, _ = container.exec_run(
+                ["test", "-f", f"/mnt/data/{filename}"],
+                demux=True,
+            )
+            if exit_code == 0:
+                return ErrorResponse(
+                    error="file_exists",
+                    message=f"{filename} already exists. Set overwrite=true to replace.",
+                )
+
+        try:
+            data = base64.b64decode(content_base64)
+        except Exception:
+            return ErrorResponse(
+                error="invalid_content",
+                message="content_base64 is not valid base64",
+            )
+
+        tar_bytes = _build_tar(filename, data)
+        container.put_archive("/mnt/data", tar_bytes)
+
+        path = f"/mnt/data/{filename}"
+        log.info(
+            "file_uploaded",
+            session_id=sid,
+            filename=filename,
+            size_bytes=len(data),
+        )
+        return UploadResult(session_id=sid, path=path)
+
+    # --- Artifact scanning ---
+
+    def _snapshot_files(self, container: Container) -> dict[str, _FileInfo]:
+        """Snapshot current files in /mnt/data (name, size, mtime)."""
+        exit_code, output = container.exec_run(
+            [
+                "find", "/mnt/data", "-maxdepth", "1", "-type", "f",
+                "-printf", "%f\\t%s\\t%T@\\n",
+            ],
+            demux=True,
+        )
+        if exit_code != 0:
+            return {}
+
+        stdout = (output[0] or b"").decode("utf-8", errors="replace")
+        files: dict[str, _FileInfo] = {}
+        for line in stdout.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                files[parts[0]] = _FileInfo(name=parts[0], size=int(parts[1]), mtime=parts[2])
+        return files
+
+    def _diff_snapshots(
+        self,
+        before: dict[str, _FileInfo],
+        after: dict[str, _FileInfo],
+    ) -> list[ArtifactInfo]:
+        """Compute new/changed files between two snapshots."""
+        artifacts: list[ArtifactInfo] = []
+        for name, info in after.items():
+            if name not in before or before[name].mtime != info.mtime:
+                mime, _ = mimetypes.guess_type(name)
+                artifacts.append(
+                    ArtifactInfo(
+                        path=f"/mnt/data/{name}",
+                        filename=name,
+                        size_bytes=info.size,
+                        mime_type=mime or "application/octet-stream",
+                    )
+                )
+        return artifacts
+
+    # --- Execute ---
+
     def execute(self, session_id: str | None, code: str) -> RunResult | ErrorResponse:
         """Execute Python code in the session container."""
         try:
@@ -89,6 +263,9 @@ class SessionManager:
 
         run_id = self.generate_run_id()
         log.info("container_exec_start", session_id=sid, run_id=run_id, code_bytes=len(code))
+
+        # Snapshot before execution
+        before = self._snapshot_files(container)
 
         start = time.monotonic()
         try:
@@ -108,6 +285,19 @@ class SessionManager:
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
+        # Artifact scan only on success
+        artifacts: list[ArtifactInfo] = []
+        if exit_code == 0:
+            after = self._snapshot_files(container)
+            artifacts = self._diff_snapshots(before, after)
+            log.debug(
+                "artifact_scan",
+                session_id=sid,
+                before_count=len(before),
+                after_count=len(after),
+                new_artifacts=[a.filename for a in artifacts],
+            )
+
         log.info(
             "container_exec_done",
             session_id=sid,
@@ -124,9 +314,88 @@ class SessionManager:
             exit_code=exit_code,
             stdout=stdout,
             stderr=stderr,
-            artifacts=[],
+            artifacts=artifacts,
             duration_ms=duration_ms,
         )
+
+    # --- List artifacts ---
+
+    def list_files(self, session_id: str) -> ListArtifactsResult | ErrorResponse:
+        """List all files in /mnt/data/ for a session."""
+        if session_id not in self._sessions:
+            return ErrorResponse(
+                error="session_not_found",
+                message=f"No active session with id {session_id}",
+            )
+
+        container = self._sessions[session_id]
+        self._last_accessed[session_id] = time.monotonic()
+
+        snapshot = self._snapshot_files(container)
+        artifacts = []
+        for name, info in snapshot.items():
+            mime, _ = mimetypes.guess_type(name)
+            artifacts.append(
+                ArtifactInfo(
+                    path=f"/mnt/data/{name}",
+                    filename=name,
+                    size_bytes=info.size,
+                    mime_type=mime or "application/octet-stream",
+                )
+            )
+        return ListArtifactsResult(artifacts=artifacts)
+
+    # --- Read artifact ---
+
+    def read_file(self, session_id: str, path: str) -> ReadArtifactResult | ErrorResponse:
+        """Read a file from the session container as base64."""
+        if session_id not in self._sessions:
+            return ErrorResponse(
+                error="session_not_found",
+                message=f"No active session with id {session_id}",
+            )
+
+        err = _validate_path(path)
+        if err:
+            return err
+
+        container = self._sessions[session_id]
+        self._last_accessed[session_id] = time.monotonic()
+        filename = PurePosixPath(path).name
+
+        try:
+            tar_stream, _stat = container.get_archive(path)
+        except Exception:
+            return ErrorResponse(
+                error="not_found",
+                message=f"No artifact at {path}",
+            )
+
+        file_bytes = _extract_from_tar(tar_stream)
+        size = len(file_bytes)
+
+        if size > self._config.max_artifact_read_bytes:
+            return ErrorResponse(
+                error="artifact_too_large",
+                message=(
+                    f"{filename} is {size // (1024 * 1024)}MB, "
+                    f"exceeds {self._config.max_artifact_read_bytes // (1024 * 1024)}MB limit."
+                ),
+                size_bytes=size,
+            )
+
+        mime, _ = mimetypes.guess_type(filename)
+        content_b64 = base64.b64encode(file_bytes).decode("ascii")
+
+        return ReadArtifactResult(
+            path=path,
+            filename=filename,
+            mime_type=mime or "application/octet-stream",
+            size_bytes=size,
+            content_base64=content_b64,
+        )
+
+    # --- Close ---
 
     def close(self, session_id: str) -> CloseSessionResult | ErrorResponse:
         """Destroy a session container."""

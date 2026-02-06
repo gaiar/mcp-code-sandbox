@@ -51,9 +51,10 @@ async def upload_file(
     Returns:
         session_id and the path where the file was stored, or an error if the file exists.
     """
-    sid = session_id or SessionManager.generate_session_id()
-    _ = content_base64, overwrite  # stub: unused until Stage 2
-    return UploadResult(session_id=sid, path=f"/mnt/data/{filename}")
+    session_id_var.set(session_id)
+    return await asyncio.to_thread(
+        session_manager.upload, session_id, filename, content_base64, overwrite
+    )
 
 
 @mcp.tool
@@ -76,8 +77,7 @@ async def run_python(
         On timeout, exit_code is -1 with a timeout message in stderr.
     """
     session_id_var.set(session_id)
-    result = await asyncio.to_thread(session_manager.execute, session_id, code)
-    return result
+    return await asyncio.to_thread(session_manager.execute, session_id, code)
 
 
 @mcp.tool
@@ -97,15 +97,8 @@ async def read_artifact(
     Returns:
         File content as base64 with metadata, or an error if not found or too large (>10MB).
     """
-    _ = session_id  # stub: unused until Stage 2
-    filename = path.rsplit("/", 1)[-1]
-    return ReadArtifactResult(
-        path=path,
-        filename=filename,
-        mime_type="application/octet-stream",
-        size_bytes=0,
-        content_base64="c3R1Yg==",  # "stub" in base64
-    )
+    session_id_var.set(session_id)
+    return await asyncio.to_thread(session_manager.read_file, session_id, path)
 
 
 @mcp.tool
@@ -123,8 +116,8 @@ async def list_artifacts(
     Returns:
         List of artifacts with filename, size, MIME type, and optional download URL.
     """
-    _ = session_id  # stub: unused until Stage 2
-    return ListArtifactsResult(artifacts=[])
+    session_id_var.set(session_id)
+    return await asyncio.to_thread(session_manager.list_files, session_id)
 
 
 @mcp.tool
@@ -143,8 +136,7 @@ async def close_session(
         Confirmation that the session was closed, or an error if not found.
     """
     session_id_var.set(session_id)
-    result = await asyncio.to_thread(session_manager.close, session_id)
-    return result
+    return await asyncio.to_thread(session_manager.close, session_id)
 
 
 def main() -> None:

@@ -110,6 +110,20 @@ class SessionManager:
         self._client = docker_client
         self._sessions: dict[str, Container] = {}
         self._last_accessed: dict[str, float] = {}
+        self._http_enabled = False
+
+    def enable_http(self) -> None:
+        """Signal that the HTTP artifact server is running."""
+        self._http_enabled = True
+
+    def _download_url(self, session_id: str, filename: str) -> str | None:
+        """Build download URL for an artifact, or None if HTTP server not running."""
+        if not self._http_enabled:
+            return None
+        host = self._config.http_host
+        if host in ("0.0.0.0", "127.0.0.1"):
+            host = "localhost"
+        return f"http://{host}:{self._config.http_port}/files/{session_id}/{filename}"
 
     @staticmethod
     def generate_session_id() -> str:
@@ -236,6 +250,7 @@ class SessionManager:
         self,
         before: dict[str, _FileInfo],
         after: dict[str, _FileInfo],
+        session_id: str,
     ) -> list[ArtifactInfo]:
         """Compute new/changed files between two snapshots."""
         artifacts: list[ArtifactInfo] = []
@@ -248,6 +263,7 @@ class SessionManager:
                         filename=name,
                         size_bytes=info.size,
                         mime_type=mime or "application/octet-stream",
+                        download_url=self._download_url(session_id, name),
                     )
                 )
         return artifacts
@@ -289,7 +305,7 @@ class SessionManager:
         artifacts: list[ArtifactInfo] = []
         if exit_code == 0:
             after = self._snapshot_files(container)
-            artifacts = self._diff_snapshots(before, after)
+            artifacts = self._diff_snapshots(before, after, sid)
             log.debug(
                 "artifact_scan",
                 session_id=sid,
@@ -341,6 +357,7 @@ class SessionManager:
                     filename=name,
                     size_bytes=info.size,
                     mime_type=mime or "application/octet-stream",
+                    download_url=self._download_url(session_id, name),
                 )
             )
         return ListArtifactsResult(artifacts=artifacts)

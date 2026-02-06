@@ -141,6 +141,19 @@ async def close_session(
 
 def main() -> None:
     """Entry point for the MCP server (stdio transport)."""
+    import threading
+
+    from mcp_code_sandbox.http_server import run_http_server
+
+    # Start HTTP artifact server in background thread
+    session_manager.enable_http()
+    http_thread = threading.Thread(
+        target=run_http_server,
+        args=(config, session_manager),
+        daemon=True,
+    )
+    http_thread.start()
+
     mcp.run()
 
 

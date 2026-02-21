@@ -256,7 +256,7 @@ async def sandbox_list_artifacts(
 
         Error — ErrorResponse:
         {
-            "error": "session_not_found|invalid_session_id",
+            "error": "session_not_found|invalid_session_id|session_busy",
             "message": "Human-readable description"
         }
     """

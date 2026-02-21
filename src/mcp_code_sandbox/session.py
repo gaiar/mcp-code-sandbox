@@ -531,6 +531,19 @@ class SessionManager:
                 message=f"No active session with id {session_id}",
             )
 
+        lock = self._locks.get(session_id)
+        lock_acquired = False
+        if lock is not None:
+            lock_acquired = lock.acquire(blocking=False)
+            if not lock_acquired:
+                return ErrorResponse(
+                    error="session_busy",
+                    message=(
+                        f"Session {session_id} is currently executing code. "
+                        "Wait for completion before closing."
+                    ),
+                )
+
         container = self._sessions.pop(session_id)
         self._last_accessed.pop(session_id, None)
         self._locks.pop(session_id, None)
@@ -541,6 +554,9 @@ class SessionManager:
         except Exception as exc:
             log.error("session_destroy_failed", session_id=session_id, error=str(exc))
             return self._map_docker_error(exc, session_id)
+        finally:
+            if lock is not None and lock_acquired:
+                lock.release()
 
         log.info("session_destroyed", session_id=session_id)
         return CloseSessionResult(status="closed")

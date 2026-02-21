@@ -111,3 +111,30 @@ def test_session_busy_rejects_concurrent_execution(
     # Wait for background thread to finish (it will timeout at 3s)
     t.join(timeout=10)
     assert len(results) == 1
+
+
+def test_close_session_busy_when_execution_in_flight(
+    short_timeout_manager: SessionManager,
+) -> None:
+    """close() returns session_busy while the same session is executing."""
+    r = short_timeout_manager.execute(None, "print('init')")
+    assert isinstance(r, RunResult)
+    sid = r.session_id
+
+    results: list[RunResult | ErrorResponse] = []
+    t = threading.Thread(
+        target=lambda: results.append(
+            short_timeout_manager.execute(sid, "import time; time.sleep(10)")
+        )
+    )
+    t.start()
+    import time
+
+    time.sleep(0.5)
+
+    close_result = short_timeout_manager.close(sid)
+    assert isinstance(close_result, ErrorResponse)
+    assert close_result.error == "session_busy"
+
+    t.join(timeout=10)
+    assert len(results) == 1

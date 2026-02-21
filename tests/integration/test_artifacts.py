@@ -71,6 +71,14 @@ def test_upload_invalid_filename(session_manager: SessionManager) -> None:
     assert result.error == "invalid_filename"
 
 
+def test_upload_invalid_base64(session_manager: SessionManager) -> None:
+    """Malformed base64 payloads are rejected."""
+    result = session_manager.upload(None, "bad.txt", "%%%%")
+    assert isinstance(result, ErrorResponse)
+    assert result.error == "invalid_content"
+    assert len(session_manager.sessions) == 0
+
+
 def test_artifact_scanning(session_manager: SessionManager) -> None:
     """Upload CSV, run code that creates PNG, verify artifacts list."""
     csv_data = b"x,y\n1,2\n3,4\n5,6\n"
@@ -157,6 +165,17 @@ def test_read_artifact_not_found(session_manager: SessionManager) -> None:
     read = session_manager.read_file(sid, "/mnt/data/nonexistent.txt")
     assert isinstance(read, ErrorResponse)
     assert read.error == "not_found"
+
+
+def test_read_artifact_outside_data_dir_rejected(session_manager: SessionManager) -> None:
+    """Paths outside /mnt/data are rejected."""
+    run = session_manager.execute(None, "print('hi')")
+    assert isinstance(run, RunResult)
+    sid = run.session_id
+
+    read = session_manager.read_file(sid, "/etc/passwd")
+    assert isinstance(read, ErrorResponse)
+    assert read.error == "invalid_path"
 
 
 def test_full_pipeline(session_manager: SessionManager) -> None:

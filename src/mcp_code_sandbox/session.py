@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import io
 import mimetypes
 import re
@@ -54,15 +55,37 @@ def _validate_filename(filename: str) -> ErrorResponse | None:
     return None
 
 
-def _validate_path(path: str) -> ErrorResponse | None:
-    """Validate that path resolves within /mnt/data/."""
-    resolved = str(PurePosixPath("/mnt/data").joinpath(PurePosixPath(path).name))
-    if not resolved.startswith("/mnt/data/"):
+def _normalize_artifact_path(path: str) -> str | ErrorResponse:
+    """Validate and normalize a path that must stay within /mnt/data/."""
+    data_root = PurePosixPath("/mnt/data")
+    candidate = PurePosixPath(path)
+
+    if not candidate.is_absolute():
+        return ErrorResponse(
+            error="invalid_path",
+            message="Path must be absolute and within /mnt/data/",
+        )
+
+    root_len = len(data_root.parts)
+    if candidate.parts[:root_len] != data_root.parts:
         return ErrorResponse(
             error="invalid_path",
             message="Path outside /mnt/data/",
         )
-    return None
+
+    relative_parts = candidate.parts[root_len:]
+    if not relative_parts:
+        return ErrorResponse(
+            error="invalid_path",
+            message="Path must point to a file in /mnt/data/",
+        )
+    if any(part in {".", ".."} for part in relative_parts):
+        return ErrorResponse(
+            error="invalid_path",
+            message="Path traversal not allowed",
+        )
+
+    return str(data_root.joinpath(*relative_parts))
 
 
 def _build_tar(filename: str, data: bytes) -> bytes:
@@ -211,6 +234,14 @@ class SessionManager:
             return err
 
         try:
+            data = base64.b64decode(content_base64, validate=True)
+        except (ValueError, binascii.Error):
+            return ErrorResponse(
+                error="invalid_content",
+                message="content_base64 is not valid base64",
+            )
+
+        try:
             result = self.get_or_create(session_id)
         except Exception as exc:
             return self._map_docker_error(exc, session_id or "unknown")
@@ -229,14 +260,6 @@ class SessionManager:
                     error="file_exists",
                     message=f"{filename} already exists. Set overwrite=true to replace.",
                 )
-
-        try:
-            data = base64.b64decode(content_base64)
-        except Exception:
-            return ErrorResponse(
-                error="invalid_content",
-                message="content_base64 is not valid base64",
-            )
 
         tar_bytes = _build_tar(filename, data)
         container.put_archive("/mnt/data", tar_bytes)
@@ -458,20 +481,20 @@ class SessionManager:
                 message=f"No active session with id {session_id}",
             )
 
-        err = _validate_path(path)
-        if err:
-            return err
+        normalized_path = _normalize_artifact_path(path)
+        if isinstance(normalized_path, ErrorResponse):
+            return normalized_path
 
         container = self._sessions[session_id]
         self._last_accessed[session_id] = time.monotonic()
-        filename = PurePosixPath(path).name
+        filename = PurePosixPath(normalized_path).name
 
         try:
-            tar_stream, _stat = container.get_archive(path)
+            tar_stream, _stat = container.get_archive(normalized_path)
         except Exception:
             return ErrorResponse(
                 error="not_found",
-                message=f"No artifact at {path}",
+                message=f"No artifact at {normalized_path}",
             )
 
         file_bytes = _extract_from_tar(tar_stream)
@@ -491,7 +514,7 @@ class SessionManager:
         content_b64 = base64.b64encode(file_bytes).decode("ascii")
 
         return ReadArtifactResult(
-            path=path,
+            path=normalized_path,
             filename=filename,
             mime_type=mime or "application/octet-stream",
             size_bytes=size,

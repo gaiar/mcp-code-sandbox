@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import mimetypes
+import base64
 from typing import TYPE_CHECKING
 
 import structlog
@@ -11,6 +11,8 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
+
+from mcp_code_sandbox.models import ErrorResponse, ReadArtifactResult
 
 if TYPE_CHECKING:
     from mcp_code_sandbox.config import SandboxConfig
@@ -27,54 +29,29 @@ def _make_app(session_manager: SessionManager) -> Starlette:
         filename = request.path_params["filename"]
         path = f"/mnt/data/{filename}"
 
-        if session_id not in session_manager.sessions:
-            return Response(
-                content=f"Session {session_id} not found",
-                status_code=404,
-            )
+        result = session_manager.read_file(session_id, path)
+        if isinstance(result, ErrorResponse):
+            if result.error == "artifact_too_large":
+                return Response(content=result.message, status_code=413)
+            if result.error in {"session_not_found", "not_found", "invalid_path"}:
+                return Response(content=result.message, status_code=404)
+            return Response(content=result.message, status_code=500)
 
-        container = session_manager.sessions[session_id]
-
-        try:
-            tar_stream, _stat = container.get_archive(path)
-        except Exception:
-            return Response(
-                content=f"File {filename} not found in session {session_id}",
-                status_code=404,
-            )
-
-        # Extract file from tar
-        import io
-        import tarfile
-
-        buf = io.BytesIO()
-        for chunk in tar_stream:
-            buf.write(chunk)
-        buf.seek(0)
-
-        with tarfile.open(fileobj=buf, mode="r") as tar:
-            members = tar.getmembers()
-            if not members:
-                return Response(content="Empty archive", status_code=404)
-            f = tar.extractfile(members[0])
-            if f is None:
-                return Response(content="Cannot read file", status_code=404)
-            file_bytes = f.read()
-
-        mime, _ = mimetypes.guess_type(filename)
-        content_type = mime or "application/octet-stream"
+        artifact = result
+        assert isinstance(artifact, ReadArtifactResult)  # for type-narrowing
+        file_bytes = base64.b64decode(artifact.content_base64)
 
         log.info(
             "artifact_download",
             session_id=session_id,
-            filename=filename,
+            filename=artifact.filename,
             size_bytes=len(file_bytes),
         )
 
         return Response(
             content=file_bytes,
-            media_type=content_type,
-            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+            media_type=artifact.mime_type,
+            headers={"Content-Disposition": f'inline; filename="{artifact.filename}"'},
         )
 
     routes = [

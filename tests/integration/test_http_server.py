@@ -59,6 +59,35 @@ def http_session_manager(
     mgr.sessions.clear()
 
 
+@pytest.fixture
+def limited_http_session_manager() -> Generator[tuple[SessionManager, int], None, None]:
+    """SessionManager with tiny artifact read limit to validate HTTP size guard."""
+    port = _find_free_port()
+    client = docker.from_env()
+    config = SandboxConfig(
+        http_host="127.0.0.1",
+        http_port=port,
+        max_artifact_read_bytes=8,
+    )
+    mgr = SessionManager(config, client)
+    mgr.enable_http()
+
+    thread = threading.Thread(
+        target=run_http_server,
+        args=(config, mgr),
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.5)
+
+    yield mgr, port
+
+    for _sid, container in list(mgr.sessions.items()):
+        with contextlib.suppress(Exception):
+            container.remove(force=True, v=True)
+    mgr.sessions.clear()
+
+
 def test_download_url_in_artifacts(http_session_manager: SessionManager, http_port: int) -> None:
     """Verify run_python includes download_url when HTTP server is running."""
     csv_data = b"x,y\n1,2\n"
@@ -131,3 +160,18 @@ def test_http_404_missing_file(http_session_manager: SessionManager, http_port: 
 
     resp = httpx.get(f"http://127.0.0.1:{http_port}/files/{sid}/nope.txt")
     assert resp.status_code == 404
+
+
+def test_http_413_for_oversized_artifact(
+    limited_http_session_manager: tuple[SessionManager, int],
+) -> None:
+    """HTTP returns 413 when artifact exceeds configured read size limit."""
+    mgr, port = limited_http_session_manager
+    payload = base64.b64encode(b"this is bigger than 8 bytes").decode()
+
+    upload = mgr.upload(None, "big.txt", payload)
+    assert isinstance(upload, UploadResult)
+    sid = upload.session_id
+
+    resp = httpx.get(f"http://127.0.0.1:{port}/files/{sid}/big.txt")
+    assert resp.status_code == 413

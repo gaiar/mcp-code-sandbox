@@ -29,7 +29,7 @@ configure_logging(config)
 
 log = structlog.get_logger("mcp_code_sandbox.server")
 
-docker_client = docker.from_env()
+docker_client = docker.from_env()  # type: ignore[attr-defined]
 session_manager = SessionManager(config, docker_client)
 
 mcp = FastMCP("code_sandbox_mcp")
@@ -296,7 +296,7 @@ async def sandbox_close_session(
 
         Error — ErrorResponse:
         {
-            "error": "session_not_found|invalid_session_id",
+            "error": "session_not_found|invalid_session_id|session_busy",
             "message": "Human-readable description"
         }
     """
@@ -317,15 +317,15 @@ def _validate_startup() -> None:
 
     try:
         docker_client.images.get(config.image)
-    except docker.errors.ImageNotFound:
-        log.error("startup_failed", reason="Sandbox image not found", image=config.image)
-        print(
-            f"ERROR: Sandbox image '{config.image}' not found. "
-            "Build it with: docker build -t llm-sandbox:latest docker/",
-            file=sys.stderr,
-        )
-        sys.exit(1)
     except Exception as exc:
+        if type(exc).__module__.startswith("docker.") and type(exc).__name__ == "ImageNotFound":
+            log.error("startup_failed", reason="Sandbox image not found", image=config.image)
+            print(
+                f"ERROR: Sandbox image '{config.image}' not found. "
+                "Build it with: docker build -t llm-sandbox:latest docker/",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         log.error("startup_failed", reason="Cannot check image", error=str(exc))
         print(f"ERROR: Cannot check Docker image: {exc}", file=sys.stderr)
         sys.exit(1)

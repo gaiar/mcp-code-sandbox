@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from mcp_code_sandbox.cleanup import _expire_idle_sessions, remove_orphan_containers
-from mcp_code_sandbox.models import CloseSessionResult
+from mcp_code_sandbox.models import CloseSessionResult, ErrorResponse
 
 
 def test_remove_orphan_containers() -> None:
@@ -49,3 +49,16 @@ def test_expire_idle_sessions() -> None:
         _expire_idle_sessions(mgr, ttl_s=60.0)
 
     mgr.close.assert_called_once_with("sess_old")
+
+
+def test_expire_idle_sessions_busy_deferred() -> None:
+    """Busy sessions are retried in later cleanup cycles."""
+    mgr = MagicMock()
+    mgr.last_accessed = {"sess_busy": 0.0}
+    mgr.close.return_value = ErrorResponse(error="session_busy", message="still running")
+
+    with patch("mcp_code_sandbox.cleanup.time") as mock_time:
+        mock_time.monotonic.return_value = 1000.0
+        _expire_idle_sessions(mgr, ttl_s=60.0)
+
+    mgr.close.assert_called_once_with("sess_busy")

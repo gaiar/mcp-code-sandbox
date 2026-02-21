@@ -13,7 +13,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 
@@ -28,9 +28,7 @@ from mcp_code_sandbox.models import (
     UploadResult,
 )
 
-if TYPE_CHECKING:
-    import docker
-    from docker.models.containers import Container
+Container = Any
 
 log = structlog.get_logger("mcp_code_sandbox.session")
 
@@ -129,7 +127,7 @@ class _FileInfo:
 class SessionManager:
     """Manage sandbox container lifecycle. All methods are synchronous."""
 
-    def __init__(self, config: SandboxConfig, docker_client: docker.DockerClient) -> None:
+    def __init__(self, config: SandboxConfig, docker_client: Any) -> None:
         self._config = config
         self._client = docker_client
         self._sessions: dict[str, Container] = {}
@@ -572,9 +570,7 @@ class SessionManager:
         return self._last_accessed
 
     def _map_docker_error(self, exc: Exception, session_id: str) -> ErrorResponse:
-        """Map docker-py exceptions to structured ErrorResponse."""
-        from docker.errors import APIError, DockerException, NotFound
-
+        """Map docker-related exceptions to structured ErrorResponse."""
         log.error(
             "docker_error",
             session_id=session_id,
@@ -582,17 +578,22 @@ class SessionManager:
             exc_type=type(exc).__name__,
         )
 
-        if isinstance(exc, NotFound):
+        exc_name = type(exc).__name__
+        exc_module = type(exc).__module__
+        is_docker_exc = exc_module.startswith("docker.")
+
+        if is_docker_exc and exc_name == "NotFound":
             return ErrorResponse(
                 error="session_not_found",
                 message=f"Container for session {session_id} not found",
             )
-        if isinstance(exc, APIError):
+        if is_docker_exc and exc_name == "APIError":
+            explanation = getattr(exc, "explanation", None)
             return ErrorResponse(
                 error="docker_error",
-                message=f"Docker API error: {exc.explanation or str(exc)}",
+                message=f"Docker API error: {explanation or str(exc)}",
             )
-        if isinstance(exc, DockerException):
+        if is_docker_exc and exc_name.endswith("DockerException"):
             return ErrorResponse(
                 error="docker_unavailable",
                 message=f"Docker unavailable: {exc}",

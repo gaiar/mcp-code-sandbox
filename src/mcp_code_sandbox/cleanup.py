@@ -5,20 +5,18 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 if TYPE_CHECKING:
-    import docker
-
     from mcp_code_sandbox.config import SandboxConfig
     from mcp_code_sandbox.session import SessionManager
 
 log = structlog.get_logger("mcp_code_sandbox.cleanup")
 
 
-def remove_orphan_containers(docker_client: docker.DockerClient) -> int:
+def remove_orphan_containers(docker_client: Any) -> int:
     """Remove any leftover sandbox containers from a previous server run.
 
     Returns the number of orphans removed.
@@ -82,4 +80,6 @@ def _expire_idle_sessions(session_manager: SessionManager, ttl_s: float) -> None
     for sid in expired:
         idle_m = int((now - session_manager.last_accessed.get(sid, now)) / 60)
         log.info("session_ttl_expired", session_id=sid, idle_minutes=idle_m)
-        session_manager.close(sid)
+        result = session_manager.close(sid)
+        if getattr(result, "error", None) == "session_busy":
+            log.info("session_ttl_deferred_busy", session_id=sid)

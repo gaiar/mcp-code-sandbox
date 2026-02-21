@@ -50,4 +50,3 @@ testpaths = ["tests"]
 markers = [
     "integration: tests requiring Docker daemon",
 ]
-asyncio_mode = "auto"
